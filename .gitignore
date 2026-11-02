@@ -1,0 +1,17 @@
+# Gradle / Android Studio
+.gradle/
+build/
+app/build/
+.idea/
+*.iml
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Machine-specific (SDK path)
+local.properties
+
+# OS
+.DS_Store
+Thumbs.db

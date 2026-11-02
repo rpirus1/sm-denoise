@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SM De-noise</string>
+    <string name="service_description">Detects when Reels, YouTube Shorts or TikTok are open and sends you back, so you can still use DMs and profiles. Reads screen structure on this device only; nothing is stored or sent anywhere.</string>
+</resources>
