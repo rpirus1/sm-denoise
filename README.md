@@ -2,7 +2,7 @@
 
 Social media without the endless video feeds. An Android app that keeps Instagram, Facebook and YouTube useful for staying in touch with friends and watching things you chose, and gets you out of Reels and Shorts.
 
-<img src="docs/screenshot.png" alt="SM De-noise settings screen" width="300">
+<img src="docs/screenshot-1.2.png" alt="SM De-noise settings screen" width="300">
 
 ## Why
 
