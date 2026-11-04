@@ -13,7 +13,6 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
-import java.time.LocalDate
 
 /**
  * Watches Instagram / Facebook / YouTube for the Reels and Shorts screens and presses Back
@@ -29,16 +28,16 @@ class BlockerService : AccessibilityService() {
 
     companion object {
         const val TAG = "SocialGuard"
-        const val PREFS = "socialguard"
 
         const val IG = "com.instagram.android"
         const val FB = "com.facebook.katana"
         const val YT = "com.google.android.youtube"
         val TIKTOK = setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
-        // Instagram: ids the reels viewer only shows for a reel someone sent you (sender name,
-        // reply bar). Swiping on to a suggested reel removes them.
-        val IG_SENT_IDS = listOf("sender_username_or_fullname", "reply_bar_container", "reel_viewer_message_composer")
+        // Instagram: ids the reels viewer only shows for a reel someone sent you (the sender's
+        // name and photo). Swiping on to a suggested reel removes them. Not the reply bar: your
+        // own reels opened from your profile have one too.
+        val IG_SENT_IDS = listOf("sender_username_or_fullname", "sender_profile_pic", "sender_timestamp")
 
         // Instagram: ids of the full-screen reels viewer. Not "reel_viewer": inside Instagram
         // that's Stories, and story avatars in the feed/DM inbox use it too.
@@ -48,8 +47,10 @@ class BlockerService : AccessibilityService() {
         const val IG_REELS_TAB_ID = "clips_tab"
         const val IG_AUTHOR_ID = "clips_author_username"
 
-        // Comma-separated Instagram usernames whose reels are always allowed
-        const val IG_ALLOWED_AUTHORS = "ig_allowed_authors"
+        // Instagram: a profile screen, and the username in its top bar
+        const val IG_PROFILE_ID = "profile_header_container"
+        const val IG_TITLE_ID = "action_bar_title"
+        val HIDDEN_COAUTHORS = Regex("""\s\d+\s*$""")
 
         // Facebook: ids of the reels viewer
         val FB_VIEWER_IDS = listOf("reels_viewer", "reel_viewer", "reels_tab_content")
@@ -76,7 +77,8 @@ class BlockerService : AccessibilityService() {
         // Ignore scroll events right after an allowed video opens (layout settling)
         const val SINGLE_GRACE_MS = 1000L
 
-        fun usageKey(pkgGroup: String) = "usage_${pkgGroup}_${LocalDate.now()}"
+        // The ticker counts TikTok and Reels time in steps of this many seconds
+        const val TICK_S = 5
     }
 
     /** Per-app state for "you may watch the one video you were sent, but not scroll on". */
@@ -88,7 +90,7 @@ class BlockerService : AccessibilityService() {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private val prefs by lazy { getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
+    private val prefs by lazy { getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE) }
     private val homePkgs by lazy {
         val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
         packageManager.queryIntentActivities(home, PackageManager.MATCH_DEFAULT_ONLY)
@@ -102,15 +104,22 @@ class BlockerService : AccessibilityService() {
     private var lastDebugLog = 0L
     private var igViewerSince = 0L
     private var igViewerWasSent = false
+    private var igProfileUser: String? = null   // the profile the open reels viewer came from
+    private var igAuthorOk = false              // the last author name seen in the viewer was allowed
+    private var igInFeed = false   // the last check found a screen the block applies to
     private val igRecheck = Runnable {
-        if (currentPkg == IG && prefs.getBoolean("block_ig", true)) checkInstagram()
+        if (currentPkg == IG && prefs.getBoolean(Prefs.BLOCK_IG, true)) checkInstagram()
     }
     private val ytState = ShortsState()
 
     private val ticker = object : Runnable {
         override fun run() {
-            tickTikTok()
-            main.postDelayed(this, 5000)
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (pm.isInteractive) {
+                tickTikTok()
+                tickInstagram()
+            }
+            main.postDelayed(this, TICK_S * 1000L)
         }
     }
 
@@ -141,20 +150,21 @@ class BlockerService : AccessibilityService() {
         if (!monitored) return
 
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-            if (pkg == YT && prefs.getBoolean("block_yt", true)) onScrolled(event, ytState)
+            if (pkg == YT && prefs.getBoolean(Prefs.BLOCK_YT, true)) onScrolled(event, ytState)
             return
         }
 
         when {
-            pkg == IG && prefs.getBoolean("block_ig", true) -> checkInstagram()
-            pkg == FB && prefs.getBoolean("block_fb", true) -> checkFacebook()
-            pkg == YT && prefs.getBoolean("block_yt", true) -> checkYouTube()
-            pkg in TIKTOK && prefs.getBoolean("limit_tt", true) -> checkTikTokBudget()
+            pkg == IG && prefs.getBoolean(Prefs.BLOCK_IG, true) -> checkInstagram()
+            pkg == FB && prefs.getBoolean(Prefs.BLOCK_FB, true) -> checkFacebook()
+            pkg == YT && prefs.getBoolean(Prefs.BLOCK_YT, true) -> checkYouTube()
+            pkg in TIKTOK && prefs.getBoolean(Prefs.LIMIT_TT, true) -> checkTikTokBudget()
         }
     }
 
     private fun onAppSwitch(from: String, to: String) {
         currentPkg = to
+        if (to != IG) igInFeed = false
         // A Short opened from a link in another app (Telegram, WhatsApp...) is "sent to you".
         // Coming back via the launcher/recents isn't.
         if (to == YT) {
@@ -173,9 +183,18 @@ class BlockerService : AccessibilityService() {
         // Only the bottom-bar Reels tab: profiles have their own "Reels" tab, which is fine.
         val reelsTab = IG_REELS_TAB_ID in scan.selectedIds
         // Reels by accounts you allowed (e.g. your own): fine, and so is swiping between them.
-        val allowed = allowedAuthors()
+        val allowed = if (Prefs.allowedOn(prefs)) Prefs.allowedAuthors(prefs) else emptyList()
         val allowedAuthor = allowed.isNotEmpty() && scan.authors.isNotEmpty() &&
             scan.authors.all { a -> allowed.any { a.contains(it) } }
+        // A reel opened from someone's profile: that person's reels play, swiping on to
+        // anyone else's doesn't. The viewer covers the profile, so remember whose it was.
+        val profile = if (IG_PROFILE_ID in scan.ids) scan.titles.firstOrNull() else null
+        if (profile != null) igProfileUser = profile else if (!viewer) igProfileUser = null
+        // A reel by many accounts reads "name and 4 more" in any language, so the profile's owner
+        // may be among the hidden ones. Usernames have no spaces, so " 4" at the end means that.
+        val profileAuthor = igProfileUser?.let { p ->
+            scan.authors.isNotEmpty() && scan.authors.all { it.contains(p) || HIDDEN_COAUTHORS.containsMatchIn(it) }
+        } == true
 
         val now = SystemClock.elapsedRealtime()
         if (!viewer) {
@@ -185,23 +204,51 @@ class BlockerService : AccessibilityService() {
             igViewerSince = now
         }
         if (sent) igViewerWasSent = true
+        // The author's name disappears for a moment while swiping and when Instagram hides the
+        // overlay. While watching allowed reels, "no name shown" isn't "someone else".
+        if (!viewer) igAuthorOk = false
+        else if (scan.authors.isNotEmpty()) igAuthorOk = allowedAuthor || profileAuthor
+        val authorOk = igAuthorOk && (scan.authors.isEmpty() || allowedAuthor || profileAuthor)
 
         // Reels tab = the feed. Viewer showing who sent it = a reel from your DMs: allowed.
         // Viewer without a sender = the feed, or you swiped on from a sent reel.
-        when {
-            reelsTab -> kick("Reels blocked")
-            !viewer || sent || allowedAuthor -> {}
+        val block = when {
+            reelsTab -> "Reels blocked"
+            !viewer || sent || authorOk -> null
             now - igViewerSince < IG_SENT_GRACE_MS -> {
                 // A playing video fires few events: look again once the grace period is over.
                 main.removeCallbacks(igRecheck)
                 main.postDelayed(igRecheck, IG_SENT_GRACE_MS - (now - igViewerSince) + 50)
+                null
             }
-            else -> kick(if (igViewerWasSent) "One video only" else "Reels blocked")
+            igViewerWasSent -> "One video only"
+            else -> "Reels blocked"
+        }
+        igInFeed = block != null
+        if (block == null) return
+        if (prefs.getBoolean(Prefs.DEBUG, false)) {
+            Log.d(TAG, "IG block: $block authors=${scan.authors} profile=$igProfileUser")
+        }
+        // Free minutes left today: watch freely while the ticker counts the time.
+        val freeMin = prefs.getInt(Prefs.IG_FREE_MIN, 0)
+        when {
+            freeMin == 0 -> kick(block)
+            igSecondsLeft(freeMin) <= 0 -> kick("Today's Reels minutes are used up")
         }
     }
 
-    private fun allowedAuthors() = (prefs.getString(IG_ALLOWED_AUTHORS, "") ?: "")
-        .split(',').map { it.trim().removePrefix("@").lowercase() }.filter { it.isNotEmpty() }
+    private fun igSecondsLeft(freeMin: Int) = freeMin * 60 - prefs.getInt(Prefs.usageKey(Prefs.USAGE_IG), 0)
+
+    /** Counts Reels time while free minutes are left, and blocks once they run out. */
+    private fun tickInstagram() {
+        val freeMin = prefs.getInt(Prefs.IG_FREE_MIN, 0)
+        if (currentPkg != IG || !igInFeed || freeMin == 0 || !prefs.getBoolean(Prefs.BLOCK_IG, true)) return
+        checkInstagram() // still on a Reels screen?
+        if (!igInFeed || igSecondsLeft(freeMin) <= 0) return
+        val key = Prefs.usageKey(Prefs.USAGE_IG)
+        prefs.edit().putInt(key, prefs.getInt(key, 0) + TICK_S).apply()
+        if (igSecondsLeft(freeMin) <= 0) checkInstagram()
+    }
 
     // ---------- Facebook ----------
 
@@ -270,15 +317,13 @@ class BlockerService : AccessibilityService() {
     }
 
     private fun tickTikTok() {
-        if (currentPkg !in TIKTOK || !prefs.getBoolean("limit_tt", true)) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (!pm.isInteractive) return
-        prefs.edit().putInt(usageKey("tiktok"), usedSeconds() + 5).apply()
+        if (currentPkg !in TIKTOK || !prefs.getBoolean(Prefs.LIMIT_TT, true)) return
+        prefs.edit().putInt(Prefs.usageKey(Prefs.USAGE_TT), usedSeconds() + TICK_S).apply()
         checkTikTokBudget()
     }
 
-    private fun usedSeconds() = prefs.getInt(usageKey("tiktok"), 0)
-    private fun limitSeconds() = prefs.getInt("tt_limit_min", 10) * 60
+    private fun usedSeconds() = prefs.getInt(Prefs.usageKey(Prefs.USAGE_TT), 0)
+    private fun limitSeconds() = prefs.getInt(Prefs.TT_LIMIT_MIN, Prefs.TT_LIMIT_DEFAULT) * 60
 
     // ---------- Helpers ----------
 
@@ -288,6 +333,7 @@ class BlockerService : AccessibilityService() {
         val descs: MutableList<String> = ArrayList(),
         val selectedIds: MutableSet<String> = HashSet(),
         val authors: MutableList<String> = ArrayList(),
+        val titles: MutableList<String> = ArrayList(),
     )
 
     private fun scan(expectedPkg: String): Scan? {
@@ -318,15 +364,19 @@ class BlockerService : AccessibilityService() {
             val name = (node.text?.toString() ?: node.contentDescription?.toString())?.lowercase()
             if (!name.isNullOrBlank()) out.authors.add(name)
         }
+        if (id == IG_TITLE_ID) {
+            val title = (node.text?.toString() ?: node.contentDescription?.toString())?.trim()?.lowercase()
+            if (!title.isNullOrBlank()) out.titles.add(title)
+        }
         for (i in 0 until node.childCount) walk(node.getChild(i), out, budget, id ?: parentId)
     }
 
     private fun debugLog(pkg: String, s: Scan) {
-        if (!prefs.getBoolean("debug", false)) return
+        if (!prefs.getBoolean(Prefs.DEBUG, false)) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastDebugLog < 1000) return
         lastDebugLog = now
-        Log.d(TAG, "$pkg ids=${s.ids.sorted()} selected=${s.selected} selectedIds=${s.selectedIds} authors=${s.authors} descs=${s.descs.take(40)}")
+        Log.d(TAG, "$pkg ids=${s.ids.sorted()} selected=${s.selected} selectedIds=${s.selectedIds} authors=${s.authors} titles=${s.titles} descs=${s.descs.take(40)}")
     }
 
     private fun kick(msg: String) {
@@ -338,6 +388,7 @@ class BlockerService : AccessibilityService() {
             streakStart = now
         }
         streak++
+        Log.i(TAG, "Back: $msg")
         if (streak > 3) {
             // Back isn't getting us out (e.g. reels is the landing screen): go home instead.
             streak = 0

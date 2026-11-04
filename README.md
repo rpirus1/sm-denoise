@@ -12,12 +12,14 @@ I wanted to use social media for messages from friends and for meaningful YouTub
 
 | App | Blocked | Still works |
 |---|---|---|
-| Instagram | Reels tab, reels in Explore, swiping on to the next reel | Feed, DMs, Stories, profiles; a reel a friend sent you in DMs plays |
+| Instagram | Reels tab, reels in Explore, swiping on to the next reel | Feed, DMs, Stories, profiles; a reel a friend sent you in DMs plays, and so do someone's reels opened from their profile |
 | YouTube | Shorts tab, Shorts feed, swiping on to the next Short | Everything else; a Short opened from a link in another app plays |
 | Facebook | Reels tab, reels opened from the feed | Feed, groups, profiles |
 | TikTok | After a daily time budget (default 10 min) | Until the budget is used up |
 
-You can also list Instagram accounts whose reels always play (for example your own, if you post reels for work).
+For Instagram you can also:
+- allow a few free minutes of Reels a day (5 to 30) before the block starts;
+- list accounts whose reels always play (for example your own, if you post reels for work).
 
 ## How it works
 
@@ -49,6 +51,7 @@ Instagram, Facebook and YouTube rename internal view ids from time to time. Turn
 
 - The code still says `socialguard` (package name, log tag): that was the app's first name. The package name stayed so an update installs over the existing app instead of next to it.
 - Built with [Claude Code](https://claude.com/claude-code) in a day, tested on my own phone with the English and Ukrainian versions of the apps.
+- Icons are from [Lucide](https://lucide.dev) (ISC licence). App icons on the settings screen are read from the apps installed on your phone; none are included here.
 - A personal project, not affiliated with Meta, Google or TikTok. Use at your own risk.
 
 ## License
